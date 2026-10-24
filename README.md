@@ -12,6 +12,8 @@ Plataforma Web/Mobile de empréstimo e aluguel de objetos de uso comum na faculd
    ADRs, Stack Tecnológica Single-Port (`:3000`), Diagramas C4 e de Sequência, Modelo Físico SQLite (`WAL Mode`), Contratos REST e Protocolo WebSocket Real-Time.
 3. **[Plano de Trabalho Paralelo para 3 Devs (`docs/WORKPLAN_3_DEVS.md`)](./docs/WORKPLAN_3_DEVS.md)**  
    Matriz de isolamento de arquivos (zero conflito de Git), uso de `USE_MOCK` e Cards detalhados (`FE-01..05`, `BE1-01..06`, `BE2-01..05`).
+4. **[Documentação Técnica e de Testes — Dev 2 (`docs/DEV2_BACKEND_CORE.md`)](./docs/DEV2_BACKEND_CORE.md)**  
+   Referência completa do Core Comercial (SQLite `WAL`, JWT `HS256`, Catálogo, Reserva Atômica `RN02`, PIX Mock, Prorrogação, Vistoria 2m, Worker TTL) e catálogo dos 39 testes automatizados (unitários e regressão E2E).
 
 ---
 
@@ -24,7 +26,10 @@ npm install
 # 2. Inicializar/Resetar o banco SQLite (data/conectalab.db) com os Seeds
 npm run db:reset
 
-# 3. Rodar em modo desenvolvimento (Servidor Fastify :3000 + Vite :5173)
+# 3. Executar suíte de testes unitários e de regressão (Dev 2)
+npm test
+
+# 4. Rodar em modo desenvolvimento (Servidor Fastify :3000 + Vite :5173)
 npm run dev
 ```
 
