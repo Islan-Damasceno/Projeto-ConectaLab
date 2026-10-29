@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
 import { db, resetDatabaseWithSeeds } from '../../db/connection.js';
+import { signAuthToken } from '../../db/auth-helper.js';
 import { registerWsConnection } from '../../ws/broker.js';
 import { stopTtlWorker } from '../../workers/ttl-worker.js';
 import { authRoutes } from '../../routes/auth.routes.js';
@@ -459,18 +460,27 @@ describe('REGRESSÃO E2E — Core Comercial Dev 2 (Gherkins SPEC, Concorrência 
       })
     ).json() as QuickLoginResponse;
 
-    const loginAdmin = (
-      await app.inject({
-        method: 'POST',
-        url: '/api/auth/quick-login',
-        payload: {
-          name: 'Mariana Costa (Admin)',
-          ra: 'ADM001',
-          email: 'mariana.admin@faculdade.edu.br',
-        },
-      })
-    ).json() as QuickLoginResponse;
-    assert.equal(loginAdmin.user.role, 'ADMIN');
+    // Quem souber o e-mail da operadora não ganha sessão ADMIN pelo login rápido de aluno
+    const adminQuickLogin = await app.inject({
+      method: 'POST',
+      url: '/api/auth/quick-login',
+      payload: {
+        name: 'Mariana Costa (Admin)',
+        ra: 'ADM001',
+        email: 'mariana.admin@faculdade.edu.br',
+      },
+    });
+    assert.equal(adminQuickLogin.statusCode, 403);
+    assert.equal(adminQuickLogin.json().error, 'ADMIN_QUICK_LOGIN_FORBIDDEN');
+
+    // Sessão ADMIN legítima (emitida pelo servidor, como faria um login administrativo próprio)
+    const adminToken = signAuthToken({
+      id: 'usr-admin-01',
+      name: 'Mariana Costa (Admin)',
+      ra: 'ADM001',
+      email: 'mariana.admin@faculdade.edu.br',
+      role: 'ADMIN',
+    });
 
     const created = (
       await app.inject({
@@ -533,19 +543,65 @@ describe('REGRESSÃO E2E — Core Comercial Dev 2 (Gherkins SPEC, Concorrência 
       403,
     );
 
-    // 4. Operadora ADMIN pode inspecionar a locação para suporte (200 OK)
+    // 4. Cadeia de IDOR: o catálogo é público e expõe o id da locação...
+    const publicCatalog = (
+      await app.inject({ method: 'GET', url: '/api/lockers/locker-bloco-b/catalog' })
+    ).json() as LockerCatalogResponse;
+    const leakedRentalId = publicCatalog.doors.find((d) => d.id === 'door-b-04')?.currentRentalId;
+    assert.equal(leakedRentalId, created.rental.id);
+
+    // ...mas forjar o header x-user-id (do dono ou do admin) sem token não abre nada
+    const spoofAttempts: Array<{
+      method: 'GET' | 'POST';
+      url: string;
+      payload?: Record<string, unknown>;
+    }> = [
+      { method: 'GET', url: `/api/rentals/${leakedRentalId}` },
+      {
+        method: 'POST',
+        url: `/api/rentals/${leakedRentalId}/extend`,
+        payload: { planType: 'HOURLY', additionalUnits: 1 },
+      },
+      {
+        method: 'POST',
+        url: `/api/rentals/${leakedRentalId}/report-issue`,
+        payload: { issueNotes: 'Cancelamento forjado' },
+      },
+    ];
+    for (const spoofedUserId of ['usr-student-01', 'usr-admin-01']) {
+      for (const attempt of spoofAttempts) {
+        const spoofed = await app.inject({
+          method: attempt.method,
+          url: attempt.url,
+          headers: { 'x-user-id': spoofedUserId },
+          payload: attempt.payload,
+        });
+        assert.equal(
+          spoofed.statusCode,
+          401,
+          `${attempt.method} ${attempt.url} com x-user-id=${spoofedUserId}`,
+        );
+        assert.equal(spoofed.json().error, 'BEARER_TOKEN_REQUIRED');
+      }
+    }
+    const untouched = db
+      .prepare('SELECT status, total_amount_cents FROM rentals WHERE id = ?')
+      .get(created.rental.id) as { status: string; total_amount_cents: number };
+    assert.deepEqual(untouched, { status: 'AWAITING_PAYMENT', total_amount_cents: 300 });
+
+    // 5. Operadora ADMIN com sessão legítima pode inspecionar a locação para suporte (200 OK)
     assert.equal(
       (
         await app.inject({
           method: 'GET',
           url: `/api/rentals/${created.rental.id}`,
-          headers: { authorization: `Bearer ${loginAdmin.token}` },
+          headers: { authorization: `Bearer ${adminToken}` },
         })
       ).statusCode,
       200,
     );
 
-    // 5. Reset de demonstração limpa transações e restaura 100% das portas
+    // 6. Reset de demonstração limpa transações e restaura 100% das portas
     const resetRes = await app.inject({
       method: 'POST',
       url: '/api/admin/demo/reset',
@@ -560,5 +616,59 @@ describe('REGRESSÃO E2E — Core Comercial Dev 2 (Gherkins SPEC, Concorrência 
       0,
     );
     assert.equal(totalAvail, 6);
+  });
+
+  it('Regressão 6 — PIX pago sem retirada em 10 min: locação cancelada e estornada, porta volta ao catálogo e o aluno reserva de novo (RF16)', async () => {
+    const loginLucas = async () =>
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/auth/quick-login',
+          payload: {
+            name: 'Lucas Andrade',
+            ra: '20261045',
+            email: 'lucas.andrade@faculdade.edu.br',
+          },
+        })
+      ).json() as QuickLoginResponse;
+    const { token } = await loginLucas();
+    const reserveJaleco = () =>
+      app.inject({
+        method: 'POST',
+        url: '/api/rentals',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { doorId: 'door-b-02', planType: 'HOURLY', durationUnits: 1 },
+      });
+
+    const first = (await reserveJaleco()).json() as CreateRentalResponse;
+    await app.inject({
+      method: 'POST',
+      url: '/api/payments/pix-mock-webhook',
+      payload: { rentalId: first.rental.id },
+    });
+    assert.equal((await loginLucas()).activeRentalId, first.rental.id);
+
+    // Pagou há 11 minutos e nunca destravou a porta
+    db.prepare('UPDATE rentals SET paid_at = ? WHERE id = ?').run(
+      new Date(Date.now() - 11 * 60_000).toISOString(),
+      first.rental.id,
+    );
+
+    const lockers = (
+      await app.inject({ method: 'GET', url: '/api/lockers' })
+    ).json() as ListLockersResponse;
+    assert.equal(lockers.lockers.find((l) => l.id === 'locker-bloco-b')?.availableDoorsCount, 4);
+    assert.deepEqual(
+      db
+        .prepare(
+          `SELECT r.status, r.cancel_reason, p.status AS payment_status
+           FROM rentals r JOIN payments p ON p.rental_id = r.id WHERE r.id = ?`,
+        )
+        .get(first.rental.id),
+      { status: 'CANCELLED', cancel_reason: 'EXPIRED_TTL', payment_status: 'REFUNDED' },
+    );
+
+    assert.equal((await loginLucas()).activeRentalId, null);
+    assert.equal((await reserveJaleco()).statusCode, 201);
   });
 });

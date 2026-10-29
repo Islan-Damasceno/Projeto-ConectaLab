@@ -13,6 +13,9 @@ import type Database from 'better-sqlite3';
  */
 const TEST_TMP_DIR = path.join(os.tmpdir(), 'conectalab-dev2-tests');
 
+// Os testes não dependem de um segredo JWT definido no shell de quem roda a suíte.
+delete process.env.CONECTALAB_JWT_SECRET;
+
 if (!process.env.CONECTALAB_DB_PATH) {
   fs.mkdirSync(TEST_TMP_DIR, { recursive: true });
   process.env.CONECTALAB_DB_PATH = path.join(

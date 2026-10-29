@@ -23,6 +23,7 @@ interface SeedRentalOptions {
   doorStatus?: DoorStatus;
   reservationExpiresAt: string;
   paidAt?: string | null;
+  firstUnlockedAt?: string | null;
   pickedUpAt?: string | null;
   expectedReturnAt?: string | null;
   createdAt?: string;
@@ -42,8 +43,8 @@ function seedRentalScenario(opts: SeedRentalOptions): void {
     `INSERT INTO rentals (
        id, user_id, locker_id, door_id, item_id,
        plan_type, duration_units, total_amount_cents,
-       status, reservation_expires_at, paid_at, picked_up_at, expected_return_at, created_at
-     ) VALUES (?, ?, ?, ?, ?, 'HOURLY', 2, 400, ?, ?, ?, ?, ?, ?)`,
+       status, reservation_expires_at, paid_at, first_unlocked_at, picked_up_at, expected_return_at, created_at
+     ) VALUES (?, ?, ?, ?, ?, 'HOURLY', 2, 400, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     opts.rentalId,
     userId,
@@ -53,6 +54,7 @@ function seedRentalScenario(opts: SeedRentalOptions): void {
     rentalStatus,
     opts.reservationExpiresAt,
     opts.paidAt ?? null,
+    opts.firstUnlockedAt ?? null,
     opts.pickedUpAt ?? null,
     opts.expectedReturnAt ?? null,
     createdAt,
@@ -278,7 +280,7 @@ describe('Unit — TTL Worker (BE1-06 / RF16 / RN02)', () => {
     assert.equal(adminSpy.messages.length, 0);
   });
 
-  it('4. NÃO cancela locações em PAID_READY_FOR_PICKUP ou IN_USE mesmo com reservation_expires_at no passado', () => {
+  it('4. NÃO cancela PAID_READY_FOR_PICKUP dentro da janela de retirada nem IN_USE, mesmo com reservation_expires_at no passado', () => {
     const referenceNow = new Date('2026-10-24T22:00:00.000Z');
 
     seedRentalScenario({
@@ -292,7 +294,7 @@ describe('Unit — TTL Worker (BE1-06 / RF16 / RN02)', () => {
       paymentStatus: 'PAID',
       doorStatus: 'AWAITING_PICKUP',
       reservationExpiresAt: '2026-10-24T20:10:00.000Z',
-      paidAt: '2026-10-24T20:05:00.000Z',
+      paidAt: '2026-10-24T21:55:00.000Z', // pago há 5 min: ainda dentro da janela de retirada
     });
 
     seedRentalScenario({
@@ -444,5 +446,191 @@ describe('Unit — TTL Worker (BE1-06 / RF16 / RN02)', () => {
       .prepare('SELECT status FROM rentals WHERE id = ?')
       .get('rnt-bg-after-stop') as { status: RentalStatus };
     assert.equal(untouchedRental.status, 'AWAITING_PAYMENT');
+  });
+
+  // ---------------------------------------------------------------------------
+  // SPEC 4.1/4.2: AguardandoRetirada -> Disponivel e Paga_LiberadaRetirada -> Cancelada por timeout
+  // ---------------------------------------------------------------------------
+
+  it('7. expira locação paga e nunca destravada após 10 min: cancela, estorna o PIX, libera a porta e notifica', () => {
+    const referenceNow = new Date('2026-10-24T21:20:00.000Z');
+
+    seedRentalScenario({
+      rentalId: 'rnt-nopickup-01',
+      paymentId: 'pay-nopickup-01',
+      userId: 'usr-student-01',
+      lockerId: 'locker-bloco-b',
+      doorId: 'door-b-02',
+      itemId: 'itm-02',
+      rentalStatus: 'PAID_READY_FOR_PICKUP',
+      paymentStatus: 'PAID',
+      doorStatus: 'AWAITING_PICKUP',
+      reservationExpiresAt: '2026-10-24T21:15:00.000Z',
+      paidAt: '2026-10-24T21:09:00.000Z', // 11 min antes de referenceNow
+    });
+
+    const ownerSpy = connectSpy({ clientType: 'STUDENT', userId: 'usr-student-01' });
+    const lockerSpy = connectSpy({ clientType: 'LOCKER', lockerId: 'locker-bloco-b' });
+
+    assert.equal(expireOverdueReservations(referenceNow), 1);
+
+    assert.deepEqual(
+      db.prepare('SELECT status, cancel_reason FROM rentals WHERE id = ?').get('rnt-nopickup-01'),
+      { status: 'CANCELLED', cancel_reason: 'EXPIRED_TTL' },
+    );
+    assert.deepEqual(
+      db.prepare('SELECT status FROM payments WHERE id = ?').get('pay-nopickup-01'),
+      { status: 'REFUNDED' },
+    );
+    assert.deepEqual(
+      db.prepare('SELECT status, lock_state, current_rental_id FROM doors WHERE id = ?').get('door-b-02'),
+      { status: 'AVAILABLE', lock_state: 'LOCKED', current_rental_id: null },
+    );
+
+    const audit = db
+      .prepare('SELECT event_type, details_json, created_at FROM door_events WHERE rental_id = ?')
+      .all('rnt-nopickup-01') as Array<{ event_type: string; details_json: string; created_at: string }>;
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].event_type, 'STATUS_CHANGE');
+    assert.equal(audit[0].created_at, referenceNow.toISOString());
+    assert.deepEqual(JSON.parse(audit[0].details_json), {
+      from: 'AWAITING_PICKUP',
+      to: 'AVAILABLE',
+      reason: 'PICKUP_TIMEOUT',
+    });
+
+    assert.deepEqual(
+      lockerSpy.getByEvent('CATALOG_STOCK_UPDATED').map((event) => event.payload),
+      [
+        {
+          lockerId: 'locker-bloco-b',
+          door: {
+            id: 'door-b-02',
+            doorNumber: 2,
+            status: 'AVAILABLE',
+            lockState: 'LOCKED',
+            currentRentalId: null,
+            currentOccupantName: null,
+            expectedReturnAt: null,
+          },
+        },
+      ],
+    );
+    assert.deepEqual(
+      ownerSpy.getByEvent('RENTAL_STATUS_UPDATED').map((event) => event.payload),
+      [
+        {
+          rentalId: 'rnt-nopickup-01',
+          status: 'CANCELLED',
+          doorId: 'door-b-02',
+          doorNumber: 2,
+          doorStatus: 'AVAILABLE',
+          lockState: 'LOCKED',
+        },
+      ],
+    );
+  });
+
+  it('8. a janela de retirada conta 10 min a partir do pagamento: expira aos 10 min exatos, não 1 ms antes', () => {
+    seedRentalScenario({
+      rentalId: 'rnt-edge-01',
+      paymentId: 'pay-edge-01',
+      rentalStatus: 'PAID_READY_FOR_PICKUP',
+      paymentStatus: 'PAID',
+      doorStatus: 'AWAITING_PICKUP',
+      reservationExpiresAt: '2026-10-24T21:05:00.000Z',
+      paidAt: '2026-10-24T21:00:00.000Z',
+    });
+    const statusOf = () =>
+      (db.prepare('SELECT status FROM rentals WHERE id = ?').get('rnt-edge-01') as { status: RentalStatus })
+        .status;
+
+    assert.equal(expireOverdueReservations(new Date('2026-10-24T21:09:59.999Z')), 0);
+    assert.equal(statusOf(), 'PAID_READY_FOR_PICKUP');
+
+    assert.equal(expireOverdueReservations(new Date('2026-10-24T21:10:00.000Z')), 1);
+    assert.equal(statusOf(), 'CANCELLED');
+  });
+
+  it('9. nunca expira locação paga cuja porta já foi destravada, mesmo 1 hora depois (o objeto pode estar com o aluno)', () => {
+    seedRentalScenario({
+      rentalId: 'rnt-opened-01',
+      paymentId: 'pay-opened-01',
+      rentalStatus: 'PAID_READY_FOR_PICKUP',
+      paymentStatus: 'PAID',
+      doorStatus: 'AWAITING_PICKUP',
+      reservationExpiresAt: '2026-10-24T20:10:00.000Z',
+      paidAt: '2026-10-24T20:05:00.000Z',
+      firstUnlockedAt: '2026-10-24T20:06:00.000Z',
+    });
+    db.prepare(`UPDATE doors SET lock_state = 'UNLOCKED' WHERE id = 'door-b-01'`).run();
+
+    assert.equal(expireOverdueReservations(new Date('2026-10-24T21:10:00.000Z')), 0);
+    assert.deepEqual(
+      db.prepare('SELECT status, cancel_reason FROM rentals WHERE id = ?').get('rnt-opened-01'),
+      { status: 'PAID_READY_FOR_PICKUP', cancel_reason: null },
+    );
+    assert.deepEqual(db.prepare('SELECT status FROM payments WHERE id = ?').get('pay-opened-01'), {
+      status: 'PAID',
+    });
+    assert.deepEqual(
+      db.prepare('SELECT status, current_rental_id FROM doors WHERE id = ?').get('door-b-01'),
+      { status: 'AWAITING_PICKUP', current_rental_id: 'rnt-opened-01' },
+    );
+  });
+
+  it('10. ao expirar uma reserva vencida, não libera a porta que já pertence a outra locação', () => {
+    const referenceNow = new Date('2026-10-24T21:15:00.000Z');
+    seedRentalScenario({
+      rentalId: 'rnt-stale-01',
+      paymentId: 'pay-stale-01',
+      userId: 'usr-student-01',
+      doorId: 'door-b-01',
+      itemId: 'itm-01',
+      rentalStatus: 'AWAITING_PAYMENT',
+      paymentStatus: 'PENDING',
+      doorStatus: 'RESERVED',
+      reservationExpiresAt: '2026-10-24T21:10:00.000Z',
+    });
+    // A porta passa a apontar para outra reserva, ainda no prazo
+    seedRentalScenario({
+      rentalId: 'rnt-current-02',
+      paymentId: 'pay-current-02',
+      userId: 'usr-student-02',
+      doorId: 'door-b-01',
+      itemId: 'itm-01',
+      rentalStatus: 'AWAITING_PAYMENT',
+      paymentStatus: 'PENDING',
+      doorStatus: 'RESERVED',
+      reservationExpiresAt: '2026-10-24T21:20:00.000Z',
+    });
+    const lockerSpy = connectSpy({ clientType: 'LOCKER', lockerId: 'locker-bloco-b' });
+    const staleOwnerSpy = connectSpy({ clientType: 'STUDENT', userId: 'usr-student-01' });
+
+    assert.equal(expireOverdueReservations(referenceNow), 1);
+
+    assert.deepEqual(
+      db.prepare('SELECT status, cancel_reason FROM rentals WHERE id = ?').get('rnt-stale-01'),
+      { status: 'CANCELLED', cancel_reason: 'EXPIRED_TTL' },
+    );
+    assert.deepEqual(
+      db.prepare('SELECT status, current_rental_id FROM doors WHERE id = ?').get('door-b-01'),
+      { status: 'RESERVED', current_rental_id: 'rnt-current-02' },
+    );
+    assert.equal(lockerSpy.getByEvent('CATALOG_STOCK_UPDATED').length, 0);
+    assert.equal(
+      staleOwnerSpy.getByEvent('RENTAL_STATUS_UPDATED')[0]?.payload.doorStatus,
+      'RESERVED',
+    );
+
+    const audit = db
+      .prepare('SELECT details_json FROM door_events WHERE rental_id = ?')
+      .get('rnt-stale-01') as { details_json: string };
+    assert.deepEqual(JSON.parse(audit.details_json), {
+      from: 'RESERVED',
+      to: 'RESERVED',
+      reason: 'EXPIRED_TTL',
+      doorReleased: false,
+    });
   });
 });

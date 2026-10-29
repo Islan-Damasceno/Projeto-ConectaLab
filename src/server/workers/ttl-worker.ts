@@ -3,40 +3,50 @@
  * Responsável Exclusivo: Dev 2 (Backend A)
  */
 
-import type { DoorStatus, LockState } from '../../shared/types.js';
+import type { DoorStatus, LockState, RentalStatus } from '../../shared/types.js';
 import { db, insertDoorEvent, runImmediateTransaction } from '../db/connection.js';
 import { broadcastCatalogStockUpdated, sendRentalStatusUpdated } from '../ws/broker.js';
 
-interface OverdueReservationRow {
+/** Prazo para destravar a porta depois do PIX aprovado (SPEC 4.1: AguardandoRetirada -> Disponivel). */
+const PICKUP_TTL_MS = 10 * 60_000;
+
+interface OverdueRentalRow {
   id: string;
   user_id: string;
   locker_id: string;
   door_id: string;
+  rental_status: RentalStatus;
   door_number: number;
   lock_state: LockState;
   door_status: DoorStatus;
-  current_rental_id: string | null;
 }
 
-interface ExpiredReservationNotification {
+interface ExpiredRentalNotification {
   rentalId: string;
   userId: string;
   lockerId: string;
   doorId: string;
   doorNumber: number;
   lockState: LockState;
+  doorStatus: DoorStatus;
+  doorReleased: boolean;
 }
 
 let workerTimer: NodeJS.Timeout | null = null;
 
 /**
- * Varre o banco SQLite em busca de reservas em `AWAITING_PAYMENT` cujo `reservation_expires_at` já venceu.
- * Executa o cancelamento e a liberação de estoque de forma atômica (`IMMEDIATE`) e dispara eventos WebSocket pós-COMMIT.
+ * Cancela, numa transação `IMMEDIATE`, as locações que estouraram o prazo e libera as portas:
+ * - reserva em `AWAITING_PAYMENT` com `reservation_expires_at` vencido (PIX expira);
+ * - locação paga (`PAID_READY_FOR_PICKUP`) cuja porta nunca foi destravada até `PICKUP_TTL_MS`
+ *   depois do pagamento (PIX estornado). Se a porta já abriu, o objeto pode estar com o aluno,
+ *   então a locação nunca expira sozinha.
+ * Só libera a porta que ainda aponta para a locação expirada. Os eventos WebSocket saem após o COMMIT.
  */
 export function expireOverdueReservations(referenceNow: Date = new Date()): number {
   const nowIso = referenceNow.toISOString();
+  const pickupDeadlineIso = new Date(referenceNow.getTime() - PICKUP_TTL_MS).toISOString();
 
-  const expiredNotifications = runImmediateTransaction<ExpiredReservationNotification[]>(() => {
+  const expired = runImmediateTransaction<ExpiredRentalNotification[]>(() => {
     const overdueRows = db
       .prepare(
         `SELECT
@@ -44,53 +54,58 @@ export function expireOverdueReservations(referenceNow: Date = new Date()): numb
            r.user_id,
            r.locker_id,
            r.door_id,
+           r.status AS rental_status,
            d.door_number,
            d.lock_state,
-           d.status AS door_status,
-           d.current_rental_id
+           d.status AS door_status
          FROM rentals r
          JOIN doors d ON r.door_id = d.id
-         WHERE r.status = 'AWAITING_PAYMENT'
-           AND r.reservation_expires_at <= ?
+         WHERE (r.status = 'AWAITING_PAYMENT' AND r.reservation_expires_at <= ?)
+            OR (r.status = 'PAID_READY_FOR_PICKUP' AND r.first_unlocked_at IS NULL AND r.paid_at <= ?)
          ORDER BY r.reservation_expires_at ASC`,
       )
-      .all(nowIso) as OverdueReservationRow[];
+      .all(nowIso, pickupDeadlineIso) as OverdueRentalRow[];
 
     if (overdueRows.length === 0) {
       return [];
     }
 
-    const updateRentalStmt = db.prepare(
+    const cancelRentalStmt = db.prepare(
       `UPDATE rentals
        SET status = 'CANCELLED', cancel_reason = 'EXPIRED_TTL'
-       WHERE id = ? AND status = 'AWAITING_PAYMENT'`,
+       WHERE id = ? AND status = ?`,
     );
 
-    const updatePaymentStmt = db.prepare(
+    const expireUnpaidPaymentStmt = db.prepare(
       `UPDATE payments
        SET status = 'EXPIRED'
        WHERE rental_id = ? AND status = 'PENDING'`,
     );
 
-    const updateDoorStmt = db.prepare(
-      `UPDATE doors
-       SET status = 'AVAILABLE', current_rental_id = NULL, updated_at = ?
-       WHERE id = ?`,
+    const refundPaymentStmt = db.prepare(
+      `UPDATE payments
+       SET status = 'REFUNDED'
+       WHERE rental_id = ? AND status = 'PAID'`,
     );
 
-    const expired: ExpiredReservationNotification[] = [];
+    const releaseDoorStmt = db.prepare(
+      `UPDATE doors
+       SET status = 'AVAILABLE', current_rental_id = NULL, updated_at = ?
+       WHERE id = ? AND current_rental_id = ?`,
+    );
+
+    const notifications: ExpiredRentalNotification[] = [];
 
     for (const row of overdueRows) {
-      const rentalResult = updateRentalStmt.run(row.id);
-      if (rentalResult.changes === 0) {
+      if (cancelRentalStmt.run(row.id, row.rental_status).changes === 0) {
         continue;
       }
 
-      updatePaymentStmt.run(row.id);
+      const pickupTimeout = row.rental_status === 'PAID_READY_FOR_PICKUP';
+      (pickupTimeout ? refundPaymentStmt : expireUnpaidPaymentStmt).run(row.id);
 
-      if (row.current_rental_id === row.id || row.door_status === 'RESERVED') {
-        updateDoorStmt.run(nowIso, row.door_id);
-      }
+      const doorReleased = releaseDoorStmt.run(nowIso, row.door_id, row.id).changes === 1;
+      const doorStatusAfter: DoorStatus = doorReleased ? 'AVAILABLE' : row.door_status;
 
       insertDoorEvent({
         doorId: row.door_id,
@@ -100,49 +115,54 @@ export function expireOverdueReservations(referenceNow: Date = new Date()): numb
         createdAt: nowIso,
         details: {
           from: row.door_status,
-          to: 'AVAILABLE',
-          reason: 'EXPIRED_TTL',
+          to: doorStatusAfter,
+          reason: pickupTimeout ? 'PICKUP_TIMEOUT' : 'EXPIRED_TTL',
+          ...(doorReleased ? {} : { doorReleased: false }),
         },
       });
 
-      expired.push({
+      notifications.push({
         rentalId: row.id,
         userId: row.user_id,
         lockerId: row.locker_id,
         doorId: row.door_id,
         doorNumber: row.door_number,
         lockState: row.lock_state,
+        doorStatus: doorStatusAfter,
+        doorReleased,
       });
     }
 
-    return expired;
+    return notifications;
   });
 
-  for (const item of expiredNotifications) {
-    broadcastCatalogStockUpdated({
-      lockerId: item.lockerId,
-      door: {
-        id: item.doorId,
-        doorNumber: item.doorNumber,
-        status: 'AVAILABLE',
-        lockState: item.lockState,
-        currentRentalId: null,
-        currentOccupantName: null,
-        expectedReturnAt: null,
-      },
-    });
+  for (const item of expired) {
+    if (item.doorReleased) {
+      broadcastCatalogStockUpdated({
+        lockerId: item.lockerId,
+        door: {
+          id: item.doorId,
+          doorNumber: item.doorNumber,
+          status: 'AVAILABLE',
+          lockState: item.lockState,
+          currentRentalId: null,
+          currentOccupantName: null,
+          expectedReturnAt: null,
+        },
+      });
+    }
 
     sendRentalStatusUpdated(item.userId, {
       rentalId: item.rentalId,
       status: 'CANCELLED',
       doorId: item.doorId,
       doorNumber: item.doorNumber,
-      doorStatus: 'AVAILABLE',
+      doorStatus: item.doorStatus,
       lockState: item.lockState,
     });
   }
 
-  return expiredNotifications.length;
+  return expired.length;
 }
 
 /**

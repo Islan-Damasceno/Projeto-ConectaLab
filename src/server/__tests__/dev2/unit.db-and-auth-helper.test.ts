@@ -1,10 +1,12 @@
 import { cleanupTestDb, ACTIVE_TEST_DB_PATH } from './setup-test-db.js';
+import crypto from 'node:crypto';
 import { after, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import {
   db,
   DB_FILE_PATH,
+  findActiveRentalId,
   initDatabase,
   insertDoorEvent,
   resetDatabaseWithSeeds,
@@ -116,6 +118,30 @@ describe('BE1-01 — Persistência SQLite (WAL Mode), Constraints e Auth Helper'
     assert.equal(idAfterReset, 1);
   });
 
+  it('findActiveRentalId considera ativa só a reserva no prazo e as fases pagas, e devolve a mais recente', () => {
+    const nowIso = '2026-10-24T21:00:00.000Z';
+    const insert = db.prepare(
+      `INSERT INTO rentals (
+         id, user_id, locker_id, door_id, item_id, plan_type, duration_units, total_amount_cents,
+         status, reservation_expires_at, created_at
+       ) VALUES (?, 'usr-student-01', 'locker-bloco-b', 'door-b-01', 'itm-01', 'HOURLY', 1, 200, ?, ?, ?)`,
+    );
+
+    // Reserva vencida que nenhuma varredura TTL limpou ainda não conta como ativa
+    insert.run('rnt-vencida', 'AWAITING_PAYMENT', '2026-10-24T20:59:59.999Z', '2026-10-24T20:50:00.000Z');
+    insert.run('rnt-concluida', 'COMPLETED', '2026-10-24T22:00:00.000Z', '2026-10-24T20:51:00.000Z');
+    insert.run('rnt-cancelada', 'CANCELLED', '2026-10-24T22:00:00.000Z', '2026-10-24T20:52:00.000Z');
+    assert.equal(findActiveRentalId('usr-student-01', nowIso), null);
+
+    // Fases pagas continuam ativas mesmo com reservation_expires_at no passado
+    insert.run('rnt-em-uso', 'IN_USE', '2026-10-24T20:00:00.000Z', '2026-10-24T20:53:00.000Z');
+    assert.equal(findActiveRentalId('usr-student-01', nowIso), 'rnt-em-uso');
+
+    insert.run('rnt-no-prazo', 'AWAITING_PAYMENT', '2026-10-24T21:00:00.001Z', '2026-10-24T20:54:00.000Z');
+    assert.equal(findActiveRentalId('usr-student-01', nowIso), 'rnt-no-prazo');
+    assert.equal(findActiveRentalId('usr-student-02', nowIso), null);
+  });
+
   it('valida domínios institucionais corretamente (RF01)', () => {
     assert.equal(isValidInstitutionalEmail('lucas.andrade@faculdade.edu.br'), true);
     assert.equal(isValidInstitutionalEmail('BEATRIZ.SILVA@ALUNO.FACULDADE.EDU.BR'), true);
@@ -183,25 +209,72 @@ describe('BE1-01 — Persistência SQLite (WAL Mode), Constraints e Auth Helper'
       assert.equal(resSpoof.statusCode, 401);
       assert.equal(resSpoof.json().error, 'TOKEN_USER_MISMATCH');
 
-      // 4. Apenas x-user-id existente (compatibilidade ADT 4.1) -> 200
+      // 4. Apenas x-user-id, sem token -> 401 (o header sozinho não autentica ninguém)
       const resHeaderOnly = await app.inject({
         method: 'GET',
         url: '/api/test-whoami',
         headers: { 'x-user-id': 'usr-student-02' },
       });
-      assert.equal(resHeaderOnly.statusCode, 200);
-      assert.equal(resHeaderOnly.json().user.id, 'usr-student-02');
+      assert.equal(resHeaderOnly.statusCode, 401);
+      assert.equal(resHeaderOnly.json().error, 'BEARER_TOKEN_REQUIRED');
 
-      // 5. x-user-id inexistente no banco -> 401 USER_NOT_FOUND
+      const resAdminHeaderOnly = await app.inject({
+        method: 'GET',
+        url: '/api/test-whoami',
+        headers: { 'x-user-id': 'usr-admin-01' },
+      });
+      assert.equal(resAdminHeaderOnly.statusCode, 401);
+      assert.equal(resAdminHeaderOnly.json().error, 'BEARER_TOKEN_REQUIRED');
+
+      // 5. Bearer válido + x-user-id do mesmo usuário (o que src/client/lib/api.ts envia) -> 200
+      const resBoth = await app.inject({
+        method: 'GET',
+        url: '/api/test-whoami',
+        headers: {
+          authorization: `Bearer ${tokenLucas}`,
+          'x-user-id': 'usr-student-01',
+        },
+      });
+      assert.equal(resBoth.statusCode, 200);
+      assert.equal(resBoth.json().user.id, 'usr-student-01');
+
+      // 6. Token íntegro de um usuário que não existe mais no banco -> 401 USER_NOT_FOUND
+      const ghostToken = signAuthToken({
+        id: 'usr-nao-existe',
+        name: 'Usuário Removido',
+        ra: '00000000',
+        email: 'removido@faculdade.edu.br',
+        role: 'STUDENT',
+      });
       const resGhost = await app.inject({
         method: 'GET',
         url: '/api/test-whoami',
-        headers: { 'x-user-id': 'usr-nao-existe' },
+        headers: { authorization: `Bearer ${ghostToken}` },
       });
       assert.equal(resGhost.statusCode, 401);
       assert.equal(resGhost.json().error, 'USER_NOT_FOUND');
     } finally {
       await app.close();
     }
+  });
+
+  it('rejeita token assinado com o segredo padrão antigo, que estava publicado no repositório', () => {
+    const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(
+      JSON.stringify({
+        sub: 'usr-admin-01',
+        userId: 'usr-admin-01',
+        email: 'mariana.admin@faculdade.edu.br',
+        ra: 'ADM001',
+        role: 'ADMIN',
+        iat: 1793299386,
+      }),
+    ).toString('base64url');
+    const signature = crypto
+      .createHmac('sha256', 'conectalab-institutional-secret-v1')
+      .update(`${header}.${payload}`)
+      .digest('base64url');
+
+    assert.equal(verifyAuthToken(`${header}.${payload}.${signature}`), null);
   });
 });

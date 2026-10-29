@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +91,48 @@ export function resetDatabaseWithSeeds(): void {
 export function runImmediateTransaction<T>(fn: () => T): T {
   const tx = db.transaction(fn);
   return tx.immediate();
+}
+
+/**
+ * Locação em andamento do usuário: reserva ainda no prazo de pagamento, paga aguardando retirada,
+ * em uso ou em devolução. Cada aluno só pode ter uma (POST /api/rentals); devolve a mais recente.
+ */
+export function findActiveRentalId(userId: string, nowIso: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT id
+       FROM rentals
+       WHERE user_id = ?
+         AND status IN ('AWAITING_PAYMENT', 'PAID_READY_FOR_PICKUP', 'IN_USE', 'AWAITING_RETURN_CLOSE')
+         AND (status != 'AWAITING_PAYMENT' OR reservation_expires_at > ?)
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(userId, nowIso) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * Devolve um segredo aleatório desta instalação, criado na primeira chamada e guardado no próprio
+ * arquivo SQLite (que fica fora do Git). Sobrevive a reinícios e ao reset da demo, porque
+ * `seeds.sql` não limpa a tabela `app_secrets`.
+ */
+export function getOrCreateLocalSecret(key: string): string {
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS app_secrets (
+       key TEXT PRIMARY KEY,
+       value TEXT NOT NULL,
+       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     )`,
+  );
+  db.prepare('INSERT OR IGNORE INTO app_secrets (key, value) VALUES (?, ?)').run(
+    key,
+    crypto.randomBytes(32).toString('base64url'),
+  );
+  const row = db.prepare('SELECT value FROM app_secrets WHERE key = ?').get(key) as {
+    value: string;
+  };
+  return row.value;
 }
 
 export interface InsertDoorEventParams {

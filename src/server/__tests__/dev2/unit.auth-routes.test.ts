@@ -168,48 +168,79 @@ describe('BE1-02 — POST /api/auth/quick-login (RF01, RNF05)', () => {
     assert.equal(secondBody.user.createdAt, persisted.created_at);
   });
 
-  it('preserva role ADMIN e id original no login de administradora existente atualizando nome e RA', async () => {
-    const adminBefore = db
-      .prepare('SELECT id, role, created_at FROM users WHERE email = ?')
-      .get('mariana.admin@faculdade.edu.br') as {
-      id: string;
-      role: string;
-      created_at: string;
-    };
+  it('recusa com 403 o login rápido de conta ADMIN, sem emitir token nem alterar o cadastro', async () => {
+    for (const email of ['mariana.admin@faculdade.edu.br', '  MARIANA.ADMIN@FACULDADE.EDU.BR ']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/auth/quick-login',
+        payload: { name: 'Quem Souber o E-mail', ra: '00000000', email },
+      });
 
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/auth/quick-login',
-      payload: {
-        name: 'Mariana Costa — Coordenação',
-        ra: 'ADM-2026',
-        email: '  MARIANA.ADMIN@FACULDADE.EDU.BR ',
-      },
-    });
-
-    assert.equal(response.statusCode, 200);
-    const body = response.json() as QuickLoginResponse;
-
-    assert.equal(body.user.id, 'usr-admin-01');
-    assert.equal(body.user.id, adminBefore.id);
-    assert.equal(body.user.role, 'ADMIN');
-    assert.equal(body.user.name, 'Mariana Costa — Coordenação');
-    assert.equal(body.user.ra, 'ADM-2026');
-    assert.equal(body.user.email, 'mariana.admin@faculdade.edu.br');
-    assert.equal(body.user.createdAt, adminBefore.created_at);
-
-    const decoded = verifyAuthToken(body.token);
-    assert.ok(decoded);
-    assert.equal(decoded.role, 'ADMIN');
-    assert.equal(decoded.ra, 'ADM-2026');
+      assert.equal(response.statusCode, 403, `e-mail ${JSON.stringify(email)}`);
+      const body = response.json() as ApiErrorResponse & { token?: string };
+      assert.equal(body.error, 'ADMIN_QUICK_LOGIN_FORBIDDEN');
+      assert.equal(body.token, undefined);
+    }
 
     const adminAfter = db
-      .prepare('SELECT id, name, ra, role, created_at FROM users WHERE id = ?')
-      .get('usr-admin-01') as DbUserVerifyRow;
-    assert.equal(adminAfter.role, 'ADMIN');
-    assert.equal(adminAfter.name, 'Mariana Costa — Coordenação');
-    assert.equal(adminAfter.ra, 'ADM-2026');
-    assert.equal(adminAfter.created_at, adminBefore.created_at);
+      .prepare('SELECT name, ra, role FROM users WHERE id = ?')
+      .get('usr-admin-01') as Pick<DbUserVerifyRow, 'name' | 'ra' | 'role'>;
+    assert.deepEqual(adminAfter, { name: 'Mariana Costa (Admin)', ra: 'ADM001', role: 'ADMIN' });
+  });
+
+  it('aceita nome de até 120 e RA de até 30 caracteres e recusa acima disso sem gravar nada', async () => {
+    const atLimit = await app.inject({
+      method: 'POST',
+      url: '/api/auth/quick-login',
+      payload: { name: 'N'.repeat(120), ra: 'R'.repeat(30), email: 'limite.exato@faculdade.edu.br' },
+    });
+    assert.equal(atLimit.statusCode, 200);
+
+    const countBefore = (
+      db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number }
+    ).total;
+
+    const overLimit = [
+      { name: 'N'.repeat(121), ra: '20260001', email: 'nome.longo@faculdade.edu.br' },
+      { name: 'Ra Longo', ra: 'R'.repeat(31), email: 'ra.longo@faculdade.edu.br' },
+      { name: 'Lucas Andrade', ra: 'R'.repeat(200_000), email: 'lucas.andrade@faculdade.edu.br' },
+    ];
+    for (const payload of overLimit) {
+      const response = await app.inject({ method: 'POST', url: '/api/auth/quick-login', payload });
+      assert.equal(response.statusCode, 400);
+      assert.equal((response.json() as ApiErrorResponse).error, 'INVALID_LOGIN_INPUT');
+    }
+
+    const countAfter = (
+      db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number }
+    ).total;
+    assert.equal(countAfter, countBefore);
+
+    const lucas = db.prepare('SELECT ra FROM users WHERE id = ?').get('usr-student-01') as {
+      ra: string;
+    };
+    assert.equal(lucas.ra, '20261045');
+  });
+
+  it('aceita e-mail institucional de até 254 caracteres e recusa a partir de 255', async () => {
+    const domain = '@faculdade.edu.br';
+    const at254 = `${'a'.repeat(254 - domain.length)}${domain}`;
+    const at255 = `${'a'.repeat(255 - domain.length)}${domain}`;
+
+    const accepted = await app.inject({
+      method: 'POST',
+      url: '/api/auth/quick-login',
+      payload: { name: 'E-mail Longo', ra: '20260002', email: at254 },
+    });
+    assert.equal(accepted.statusCode, 200);
+
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/api/auth/quick-login',
+      payload: { name: 'E-mail Longo Demais', ra: '20260003', email: at255 },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal((rejected.json() as ApiErrorResponse).error, 'INVALID_INSTITUTIONAL_EMAIL');
   });
 
   it('rejeita HTTP 400 INVALID_INSTITUTIONAL_EMAIL para domínios pessoais, maliciosos ou malformados', async () => {
