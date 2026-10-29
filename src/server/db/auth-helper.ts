@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { ApiErrorResponse, User, UserRole } from '../../shared/types.js';
-import { db } from './connection.js';
+import { db, getOrCreateLocalSecret } from './connection.js';
 
 /**
  * Domínios institucionais aceitos pelo ConectaLab (SPEC.md RF01 & ADT.md 4.2.1):
@@ -11,8 +11,26 @@ import { db } from './connection.js';
 export const INSTITUTIONAL_EMAIL_REGEX =
   /^[a-zA-Z0-9._%+-]+@(?:aluno\.)?faculdade\.edu\.br$/i;
 
-const JWT_SECRET =
-  process.env.CONECTALAB_JWT_SECRET ?? 'conectalab-institutional-secret-v1';
+const MAX_EMAIL_LENGTH = 254; // limite de endereço da RFC 5321
+
+const MIN_ENV_SECRET_LENGTH = 32;
+const ENV_JWT_SECRET = process.env.CONECTALAB_JWT_SECRET?.trim() || null;
+if (ENV_JWT_SECRET !== null && ENV_JWT_SECRET.length < MIN_ENV_SECRET_LENGTH) {
+  throw new Error(
+    `CONECTALAB_JWT_SECRET precisa ter pelo menos ${MIN_ENV_SECRET_LENGTH} caracteres.`,
+  );
+}
+
+let jwtSecret: string | null = ENV_JWT_SECRET;
+
+/**
+ * Segredo HS256: CONECTALAB_JWT_SECRET quando definido; senão, um segredo aleatório desta
+ * instalação guardado no SQLite. Nunca um valor fixo no código, porque o repositório é público.
+ */
+function getJwtSecret(): string {
+  jwtSecret ??= getOrCreateLocalSecret('jwt_hs256_secret');
+  return jwtSecret;
+}
 
 interface JwtPayload {
   sub: string;
@@ -37,7 +55,8 @@ interface DbUserRow {
  */
 export function isValidInstitutionalEmail(email: string): boolean {
   if (typeof email !== 'string') return false;
-  return INSTITUTIONAL_EMAIL_REGEX.test(email.trim());
+  const trimmed = email.trim();
+  return trimmed.length <= MAX_EMAIL_LENGTH && INSTITUTIONAL_EMAIL_REGEX.test(trimmed);
 }
 
 /**
@@ -57,7 +76,7 @@ export function signAuthToken(user: User): string {
   };
   const payload = Buffer.from(JSON.stringify(payloadObj)).toString('base64url');
   const signature = crypto
-    .createHmac('sha256', JWT_SECRET)
+    .createHmac('sha256', getJwtSecret())
     .update(`${header}.${payload}`)
     .digest('base64url');
 
@@ -77,7 +96,7 @@ export function verifyAuthToken(token: string): JwtPayload | null {
   if (!headerB64 || !payloadB64 || !signatureB64) return null;
 
   const expectedSig = crypto
-    .createHmac('sha256', JWT_SECRET)
+    .createHmac('sha256', getJwtSecret())
     .update(`${headerB64}.${payloadB64}`)
     .digest('base64url');
 
@@ -108,14 +127,14 @@ export type AuthResolutionResult =
   | { ok: false; statusCode: 401; body: ApiErrorResponse };
 
 /**
- * Resolve o usuário autenticado a partir de `Authorization: Bearer <token>`
- * e/ou header `x-user-id` (conforme ADT.md Seção 4.1 e RNF05).
+ * Resolve o usuário autenticado a partir de `Authorization: Bearer <token>` (RNF05).
  *
  * Regras de Segurança (RNF05):
- * 1. Se `Authorization` for enviado, valida obrigatoriamente a assinatura HS256.
- * 2. Se ambos `Authorization` e `x-user-id` forem enviados, exige que apontem para o mesmo `userId` (anti-spoofing).
- * 3. Se apenas `x-user-id` for enviado (suporte de integração ADT 4.1/4.2.5), valida o usuário na tabela `users`.
- * 4. Confirma sempre que o registro existe no SQLite.
+ * 1. O token Bearer é obrigatório e sua assinatura HS256 é sempre validada.
+ * 2. `x-user-id` é opcional e só serve como conferência: se vier junto, precisa apontar para o
+ *    mesmo `userId` do token (anti-spoofing). Sozinho, não autentica ninguém, porque qualquer
+ *    cliente pode escrever qualquer valor nele.
+ * 3. Confirma sempre que o registro existe no SQLite.
  */
 export function resolveAuthenticatedUser(request: FastifyRequest): AuthResolutionResult {
   const authHeader = request.headers.authorization;
@@ -165,7 +184,15 @@ export function resolveAuthenticatedUser(request: FastifyRequest): AuthResolutio
 
     resolvedUserId = verified.userId;
   } else if (xUserId) {
-    resolvedUserId = xUserId;
+    return {
+      ok: false,
+      statusCode: 401,
+      body: {
+        error: 'BEARER_TOKEN_REQUIRED',
+        message:
+          'Envie o token de sessão no cabeçalho Authorization: Bearer <token>. O cabeçalho x-user-id sozinho não autentica.',
+      },
+    };
   }
 
   if (!resolvedUserId) {

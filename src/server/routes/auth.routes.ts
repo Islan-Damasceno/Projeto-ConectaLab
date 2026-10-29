@@ -7,7 +7,7 @@ import type {
   User,
   UserRole,
 } from '../../shared/types.js';
-import { db, runImmediateTransaction } from '../db/connection.js';
+import { db, findActiveRentalId, runImmediateTransaction } from '../db/connection.js';
 import { isValidInstitutionalEmail, signAuthToken } from '../db/auth-helper.js';
 import { expireOverdueReservations } from '../workers/ttl-worker.js';
 
@@ -20,9 +20,8 @@ interface DbUserRow {
   created_at: string;
 }
 
-interface DbActiveRentalRow {
-  id: string;
-}
+const MAX_NAME_LENGTH = 120;
+const MAX_RA_LENGTH = 30;
 
 /**
  * Rotas de Autenticação Institucional Rápida (RF01, RNF05)
@@ -32,10 +31,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /api/auth/quick-login
    *
-   * 1. Valida o domínio institucional (`@faculdade.edu.br` ou `@aluno.faculdade.edu.br`) e campos obrigatórios (`name`, `ra`).
+   * 1. Valida o domínio institucional (`@faculdade.edu.br` ou `@aluno.faculdade.edu.br`) e campos obrigatórios (`name`, `ra`) com limite de tamanho.
    * 2. Expira reservas com TTL vencido antes de consultar locações ativas.
-   * 3. Realiza Upsert atômico na tabela `users` preservando `id`, `role` e `created_at` quando já existente.
-   * 4. Consulta locação ativa do usuário e retorna `QuickLoginResponse` com token JWT HS256 assinado.
+   * 3. Recusa contas ADMIN (403): o login rápido é só para alunos e não tem senha.
+   * 4. Realiza Upsert atômico na tabela `users` preservando `id`, `role` e `created_at` quando já existente.
+   * 5. Consulta locação ativa do usuário e retorna `QuickLoginResponse` com token JWT HS256 assinado.
    */
   app.post<{
     Body: QuickLoginRequest;
@@ -68,16 +68,32 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const trimmedName = name.trim();
     const trimmedRa = ra.trim();
 
+    if (trimmedName.length > MAX_NAME_LENGTH || trimmedRa.length > MAX_RA_LENGTH) {
+      return reply.status(400).send({
+        error: 'INVALID_LOGIN_INPUT',
+        message: `Nome deve ter até ${MAX_NAME_LENGTH} caracteres e RA até ${MAX_RA_LENGTH}.`,
+      });
+    }
+
     expireOverdueReservations();
 
     const nowIso = new Date().toISOString();
 
-    const { user, activeRentalId } = runImmediateTransaction(() => {
+    type LoginTxResult =
+      | { kind: 'ADMIN_FORBIDDEN' }
+      | { kind: 'OK'; user: User; activeRentalId: string | null };
+
+    const outcome = runImmediateTransaction<LoginTxResult>(() => {
       const existingUser = db
         .prepare(
           'SELECT id, name, ra, email, role, created_at FROM users WHERE email = ?',
         )
         .get(normalizedEmail) as DbUserRow | undefined;
+
+      // O login rápido não tem senha: liberar uma conta ADMIN aqui daria o painel a quem souber o e-mail
+      if (existingUser?.role === 'ADMIN') {
+        return { kind: 'ADMIN_FORBIDDEN' };
+      }
 
       let resolvedUser: User;
 
@@ -115,30 +131,26 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         };
       }
 
-      const activeRental = db
-        .prepare(
-          `SELECT id
-           FROM rentals
-           WHERE user_id = ?
-             AND status IN ('AWAITING_PAYMENT', 'PAID_READY_FOR_PICKUP', 'IN_USE', 'AWAITING_RETURN_CLOSE')
-             AND (status != 'AWAITING_PAYMENT' OR reservation_expires_at > ?)
-           ORDER BY created_at DESC
-           LIMIT 1`,
-        )
-        .get(resolvedUser.id, nowIso) as DbActiveRentalRow | undefined;
-
       return {
+        kind: 'OK',
         user: resolvedUser,
-        activeRentalId: activeRental?.id ?? null,
+        activeRentalId: findActiveRentalId(resolvedUser.id, nowIso),
       };
     });
 
-    const token = signAuthToken(user);
+    if (outcome.kind === 'ADMIN_FORBIDDEN') {
+      return reply.status(403).send({
+        error: 'ADMIN_QUICK_LOGIN_FORBIDDEN',
+        message: 'Contas administrativas não usam o login rápido de aluno.',
+      });
+    }
+
+    const token = signAuthToken(outcome.user);
 
     return reply.status(200).send({
       token,
-      user,
-      activeRentalId,
+      user: outcome.user,
+      activeRentalId: outcome.activeRentalId,
     });
   });
 }

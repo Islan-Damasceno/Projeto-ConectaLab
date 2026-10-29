@@ -19,8 +19,14 @@ import type {
   Rental,
   RentalStatus,
 } from '../../shared/types.js';
-import { db, insertDoorEvent, runImmediateTransaction } from '../db/connection.js';
+import {
+  db,
+  findActiveRentalId,
+  insertDoorEvent,
+  runImmediateTransaction,
+} from '../db/connection.js';
 import { requireAuthenticatedUser } from '../db/auth-helper.js';
+import { buildMockPixQrSvg, buildPixCopyPastePayload } from '../db/pix-mock.js';
 import { expireOverdueReservations } from '../workers/ttl-worker.js';
 import {
   broadcastCatalogStockUpdated,
@@ -30,6 +36,7 @@ import {
 
 const RESERVATION_TTL_MS = 10 * 60_000; // 10 minutos (RF04 / RF16)
 const INSPECTION_WINDOW_MS = 120_000; // 2 minutos (RF10)
+const MAX_ISSUE_NOTES_LENGTH = 500;
 
 interface DoorJoinRow {
   door_id: string;
@@ -95,30 +102,35 @@ interface HydratedRentalBundle {
   dailyPriceCents: number;
 }
 
-function buildPixCopyPastePayload(rentalId: string, amountCents: number): string {
-  const formattedReais = (amountCents / 100).toFixed(2);
-  const amountTag = `54${String(formattedReais.length).padStart(2, '0')}${formattedReais}`;
-  return `00020126580014BR.GOV.BCB.PIX0136conectalab-pix-mock-${rentalId}520400005303986${amountTag}5802BR5910CONECTALAB6009SAOPAULO62070503***6304ABCD`;
-}
-
-function buildMockPixQrSvg(rentalId: string): string {
-  const hash = crypto.createHash('sha256').update(rentalId).digest();
-  const rects: string[] = [];
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
-      const bit = (hash[row] >> col) & 1;
-      if (bit === 1) {
-        rects.push(
-          `<rect x="${16 + col * 11}" y="${16 + row * 11}" width="9" height="9" fill="#0f172a"/>`,
-        );
-      }
-    }
-  }
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" rx="8" fill="#ffffff"/>${rects.join('')}</svg>`;
-}
-
 function isValidPlanType(value: unknown): value is PlanType {
   return value === 'HOURLY' || value === 'DAILY';
+}
+
+const HOURS_PER_DAY = 24;
+
+/**
+ * Soma a prorrogação ao contrato mantendo `duration_units` na unidade de `plan_type`, de modo que
+ * a duração contratada sempre corresponda ao prazo. Misturar diária com hora converte o contrato
+ * para horas, a única unidade que representa as duas.
+ */
+function extendContract(
+  current: { planType: PlanType; durationUnits: number },
+  extension: { planType: PlanType; additionalUnits: number },
+): { planType: PlanType; durationUnits: number } {
+  if (current.planType === extension.planType) {
+    return {
+      planType: current.planType,
+      durationUnits: current.durationUnits + extension.additionalUnits,
+    };
+  }
+  const toHours = (planType: PlanType, units: number) =>
+    planType === 'DAILY' ? units * HOURS_PER_DAY : units;
+  return {
+    planType: 'HOURLY',
+    durationUnits:
+      toHours(current.planType, current.durationUnits) +
+      toHours(extension.planType, extension.additionalUnits),
+  };
 }
 
 function getHydratedRentalById(rentalId: string): HydratedRentalBundle | null {
@@ -271,6 +283,7 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
     type CreateTxResult =
       | { kind: 'DOOR_NOT_FOUND' }
       | { kind: 'DOOR_WITHOUT_ITEM' }
+      | { kind: 'USER_HAS_ACTIVE_RENTAL' }
       | { kind: 'DOOR_NOT_AVAILABLE' }
       | {
           kind: 'CREATED';
@@ -280,6 +293,7 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
         };
 
     const txResult = runImmediateTransaction<CreateTxResult>(() => {
+      const now = new Date();
       const doorRow = db
         .prepare(
           `SELECT
@@ -315,6 +329,12 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
         return { kind: 'DOOR_WITHOUT_ITEM' };
       }
 
+      // Uma locação ativa por aluno: o login devolve um único activeRentalId, e reservar sem pagar
+      // não pode servir para segurar várias portas ao mesmo tempo
+      if (findActiveRentalId(authUser.id, now.toISOString())) {
+        return { kind: 'USER_HAS_ACTIVE_RENTAL' };
+      }
+
       // RN02: Bloqueio atômico contra dupla locação
       if (doorRow.door_status !== 'AVAILABLE') {
         return { kind: 'DOOR_NOT_AVAILABLE' };
@@ -324,7 +344,6 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
         planType === 'HOURLY' ? doorRow.hourly_price_cents : doorRow.daily_price_cents;
       const totalAmountCents = unitPriceCents * durationUnits;
 
-      const now = new Date();
       const createdAt = now.toISOString();
       const reservationExpiresAt = new Date(
         now.getTime() + RESERVATION_TTL_MS,
@@ -450,6 +469,14 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(409).send({
         error: 'DOOR_WITHOUT_ITEM',
         message: 'Esta porta não possui nenhum objeto vinculado para locação.',
+      });
+    }
+
+    if (txResult.kind === 'USER_HAS_ACTIVE_RENTAL') {
+      return reply.status(409).send({
+        error: 'USER_HAS_ACTIVE_RENTAL',
+        message:
+          'Você já tem uma locação em andamento. Conclua ou cancele a atual antes de reservar outro objeto.',
       });
     }
 
@@ -605,24 +632,23 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
         planType === 'HOURLY' ? current.hourlyPriceCents : current.dailyPriceCents;
       const addedAmountCents = unitPriceCents * additionalUnits;
       const newTotalAmountCents = current.rental.totalAmountCents + addedAmountCents;
-      const newDurationUnits =
-        current.rental.planType === planType
-          ? current.rental.durationUnits + additionalUnits
-          : current.rental.durationUnits;
+      const contract = extendContract(current.rental, { planType, additionalUnits });
 
+      // `payments` guarda só o PIX realmente pago na reserva; o acréscimo fica em `total_amount_cents`
       db.prepare(
         `UPDATE rentals
          SET expected_return_at = ?,
              total_amount_cents = ?,
+             plan_type = ?,
              duration_units = ?
          WHERE id = ?`,
-      ).run(newExpectedReturnAt, newTotalAmountCents, newDurationUnits, rentalId);
-
-      db.prepare(
-        `UPDATE payments
-         SET amount_cents = ?
-         WHERE rental_id = ?`,
-      ).run(newTotalAmountCents, rentalId);
+      ).run(
+        newExpectedReturnAt,
+        newTotalAmountCents,
+        contract.planType,
+        contract.durationUnits,
+        rentalId,
+      );
 
       insertDoorEvent({
         doorId: current.rental.doorId,
@@ -736,10 +762,18 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    if (issueNotes.length > MAX_ISSUE_NOTES_LENGTH) {
+      return reply.status(400).send({
+        error: 'INVALID_ISSUE_NOTES',
+        message: `Descreva o defeito em até ${MAX_ISSUE_NOTES_LENGTH} caracteres.`,
+      });
+    }
+
     type ReportIssueTxResult =
       | { kind: 'NOT_FOUND' }
       | { kind: 'FORBIDDEN' }
       | { kind: 'ALREADY_CLOSED'; currentStatus: RentalStatus }
+      | { kind: 'RETURN_IN_PROGRESS' }
       | { kind: 'NOT_UNLOCKED_YET' }
       | { kind: 'WINDOW_EXPIRED' }
       | {
@@ -771,6 +805,12 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
         current.rental.status === 'COMPLETED'
       ) {
         return { kind: 'ALREADY_CLOSED', currentStatus: current.rental.status };
+      }
+
+      // Pela máquina de estados da SPEC, a vistoria só cancela a partir de EmUso (ou da porta
+      // aberta na retirada); com a devolução iniciada, o contrato segue para Concluida
+      if (current.rental.status === 'AWAITING_RETURN_CLOSE') {
+        return { kind: 'RETURN_IN_PROGRESS' };
       }
 
       if (
@@ -878,6 +918,14 @@ export async function rentalsRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(409).send({
         error: 'RENTAL_ALREADY_CLOSED',
         message: `Esta locação já está encerrada com status '${outcome.currentStatus}'.`,
+      });
+    }
+
+    if (outcome.kind === 'RETURN_IN_PROGRESS') {
+      return reply.status(409).send({
+        error: 'RENTAL_RETURN_IN_PROGRESS',
+        message:
+          'A devolução desta locação já começou. A vistoria expressa não está mais disponível.',
       });
     }
 
