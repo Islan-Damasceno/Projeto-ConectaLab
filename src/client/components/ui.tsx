@@ -3,20 +3,21 @@ import type { DoorStatus } from '../../shared/types.js';
 
 /**
  * Componentes base do app ConectaLab.
- * Linguagem visual minimalista e editorial: fundo creme como "papel",
- * verde escuro como "tinta", limão só como destaque; sem cantos
- * arredondados nem sombras; rótulos pequenos em caixa alta e espaçados;
- * campos marcados só por uma linha embaixo.
+ * Estilo tirado do crachá: fundo verde, cartões creme bem arredondados,
+ * títulos em verde escuro peso 800 e etiquetas verde-limão em caixa alta.
  */
 
 type ButtonVariant = 'primary' | 'lime' | 'outline' | 'ghost';
 
 const buttonStyles: Record<ButtonVariant, string> = {
-  primary: 'bg-conecta-deep text-conecta-cream hover:bg-conecta-green',
+  // verde escuro com texto limão — ação principal dentro de cartões creme
+  primary: 'bg-conecta-deep text-conecta-lime hover:bg-conecta-green',
+  // limão com texto verde escuro — ação principal sobre fundo verde
   lime: 'bg-conecta-lime text-conecta-deep hover:brightness-95',
-  outline:
-    'border border-conecta-deep text-conecta-deep hover:bg-conecta-deep hover:text-conecta-cream',
-  ghost: 'text-conecta-deep underline-offset-4 hover:underline',
+  // contorno — ações secundárias em cartões creme
+  outline: 'border-2 border-conecta-deep/20 text-conecta-deep hover:border-conecta-deep/50',
+  // discreto — links e ações terciárias sobre fundo verde
+  ghost: 'text-conecta-cream/80 hover:text-conecta-cream',
 };
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -36,12 +37,12 @@ export function Button({
   children,
   ...rest
 }: ButtonProps) {
-  const sizeClass = size === 'lg' ? 'h-14 px-6' : 'h-12 px-5';
+  const sizeClass = size === 'lg' ? 'py-4 px-6 text-lg' : 'py-3 px-5 text-base';
   return (
     <button
       disabled={disabled || loading}
-      className={`inline-flex items-center justify-center gap-2 text-[13px] font-semibold uppercase tracking-[0.2em]
-        transition-colors disabled:cursor-not-allowed disabled:opacity-30
+      className={`inline-flex items-center justify-center gap-2 rounded-full font-extrabold transition
+        active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40
         ${sizeClass} ${buttonStyles[variant]} ${fullWidth ? 'w-full' : ''} ${className}`}
       {...rest}
     >
@@ -53,26 +54,27 @@ export function Button({
 function Spinner() {
   return (
     <span
-      className="h-4 w-4 animate-spin rounded-full border border-current border-t-transparent"
+      className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"
       aria-label="Carregando"
     />
   );
 }
 
-/** Bloco com borda fina, sem sombra nem arredondado. */
+/** Cartão creme arredondado, igual ao bloco do nome no crachá. */
 export function Card({ className = '', children }: { className?: string; children: React.ReactNode }) {
-  return <div className={`border border-conecta-deep/15 p-5 text-conecta-deep ${className}`}>{children}</div>;
+  return (
+    <div className={`rounded-card bg-conecta-cream p-6 text-conecta-deep shadow-sm ${className}`}>
+      {children}
+    </div>
+  );
 }
 
-/** Rótulo de seção em caixa alta (ex.: "INICIAR SESSÃO"). */
-export function SectionLabel({ className = '', children }: { className?: string; children: React.ReactNode }) {
-  return <p className={`label-caps ${className}`}>{children}</p>;
-}
-
-/** Etiqueta pequena com contorno fino. */
+/** Etiqueta em caixa alta (como "EQUIPE CONECTALAB" no crachá). */
 export function Tag({ className = '', children }: { className?: string; children: React.ReactNode }) {
   return (
-    <span className={`inline-block border border-current px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] ${className}`}>
+    <span
+      className={`inline-block rounded-full bg-conecta-deep px-4 py-1.5 text-xs font-extrabold uppercase tracking-[0.18em] text-conecta-lime ${className}`}
+    >
       {children}
     </span>
   );
@@ -84,43 +86,41 @@ interface TextFieldProps extends React.InputHTMLAttributes<HTMLInputElement> {
   error?: string | null;
 }
 
-/** Campo só com a linha de baixo, rótulo pequeno em caixa alta. */
 export function TextField({ label, hint, error, id, className = '', ...rest }: TextFieldProps) {
   const inputId = id ?? `field-${label.toLowerCase().replace(/\W+/g, '-')}`;
   return (
     <label htmlFor={inputId} className="block">
-      <span className="label-caps block text-conecta-deep/60">{label}</span>
+      <span className="mb-1.5 block text-sm font-bold text-conecta-deep">{label}</span>
       <input
         id={inputId}
-        className={`w-full border-0 border-b border-solid bg-transparent px-0 py-3 text-base text-conecta-deep outline-none transition-colors
-          placeholder:text-conecta-deep/30 focus:border-conecta-deep
-          ${error ? 'border-red-600' : 'border-conecta-deep/25'} ${className}`}
+        className={`w-full rounded-2xl border-2 bg-white px-4 py-3 text-base text-conecta-deep outline-none transition
+          placeholder:text-conecta-deep/35 focus:border-conecta-green
+          ${error ? 'border-red-500' : 'border-conecta-mist'} ${className}`}
         {...rest}
       />
       {error ? (
-        <span className="mt-2 block text-xs text-red-700">{error}</span>
+        <span className="mt-1.5 block text-sm font-semibold text-red-700">{error}</span>
       ) : hint ? (
-        <span className="mt-2 block text-xs text-conecta-deep/55">{hint}</span>
+        <span className="mt-1.5 block text-xs text-conecta-deep/55">{hint}</span>
       ) : null}
     </label>
   );
 }
 
-/** Rótulo e cor do indicador de cada status de porta, em português. */
-export const doorStatusInfo: Record<DoorStatus, { label: string; dot: string }> = {
-  AVAILABLE: { label: 'Disponível', dot: 'bg-conecta-lime ring-1 ring-conecta-deep/40' },
-  RESERVED: { label: 'Reservado', dot: 'bg-amber-400' },
-  AWAITING_PICKUP: { label: 'Aguardando retirada', dot: 'bg-amber-400' },
-  OCCUPIED_RENTED: { label: 'Alugado', dot: 'bg-conecta-deep/30' },
-  IN_PREPARATION: { label: 'Higienizando', dot: 'bg-sky-400' },
-  MAINTENANCE: { label: 'Manutenção', dot: 'bg-red-500' },
+/** Rótulo e cor de cada status de porta, em português, para o aluno. */
+export const doorStatusInfo: Record<DoorStatus, { label: string; className: string }> = {
+  AVAILABLE: { label: 'Disponível', className: 'bg-conecta-lime text-conecta-deep' },
+  RESERVED: { label: 'Reservado', className: 'bg-amber-200 text-amber-900' },
+  AWAITING_PICKUP: { label: 'Aguardando retirada', className: 'bg-amber-200 text-amber-900' },
+  OCCUPIED_RENTED: { label: 'Alugado', className: 'bg-conecta-mist text-conecta-deep/70' },
+  IN_PREPARATION: { label: 'Higienizando', className: 'bg-sky-200 text-sky-900' },
+  MAINTENANCE: { label: 'Manutenção', className: 'bg-red-200 text-red-900' },
 };
 
 export function StatusBadge({ status }: { status: DoorStatus }) {
   const info = doorStatusInfo[status];
   return (
-    <span className="inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-conecta-deep">
-      <span className={`h-2 w-2 rounded-full ${info.dot}`} />
+    <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-extrabold ${info.className}`}>
       {info.label}
     </span>
   );

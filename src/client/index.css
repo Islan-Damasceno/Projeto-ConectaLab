@@ -1,4 +1,4 @@
-/* Bricolage Grotesque com eixos de peso e largura (permite a versão condensada) */
+/* Bricolage Grotesque com eixos de peso e largura */
 @import '@fontsource-variable/bricolage-grotesque/standard.css';
 
 @tailwind base;
@@ -7,23 +7,17 @@
 
 @layer base {
   body {
-    font-weight: 450;
+    font-weight: 500;
   }
   h1,
   h2,
   h3 {
     font-weight: 800;
-  }
-  input {
-    border-radius: 0;
+    letter-spacing: -0.02em;
   }
 }
 
 @layer utilities {
-  /* Títulos de "campanha": condensados e em caixa alta */
-  .font-condensed {
-    font-stretch: 75%;
-  }
   /* Rótulos pequenos em caixa alta com letras espaçadas */
   .label-caps {
     font-size: 11px;
