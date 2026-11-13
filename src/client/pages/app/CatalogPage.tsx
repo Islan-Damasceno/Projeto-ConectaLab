@@ -1,10 +1,10 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BatteryCharging, Calculator, MapPin, Minus, Plus, PlugZap, Shirt, X } from 'lucide-react';
+import { BatteryCharging, Calculator, ChevronRight, MapPin, Minus, Plus, PlugZap, Shirt, X } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { useConectaWs } from '../../lib/ws-client.js';
 import { AppHeader } from '../../components/AppHeader.js';
-import { Button, StatusBadge } from '../../components/ui.js';
+import { Button, doorStatusInfo } from '../../components/ui.js';
 import type { CatalogItem, DoorWithItem, Locker, PlanType } from '../../../shared/types.js';
 
 /**
@@ -144,12 +144,10 @@ export function CatalogPage() {
     <main className={`mx-auto w-full max-w-md px-5 pt-5 ${selectedDoor ? 'pb-96' : 'pb-10'}`}>
       <AppHeader />
 
-      <h1 className="mt-8 text-[2.5rem] leading-[0.95] text-conecta-cream">
-        Do que você <span className="text-conecta-lime">precisa</span> hoje?
-      </h1>
+      <h1 className="mt-10 text-[2.25rem] leading-[1] text-conecta-cream">Do que você precisa hoje?</h1>
 
-      {/* Abas dos armários */}
-      <div className="mt-6 grid grid-cols-2 gap-2" role="tablist">
+      {/* Abas dos armários: texto com sublinhado */}
+      <div className="mt-8 flex gap-8 border-b border-conecta-cream/15" role="tablist">
         {lockers.map((locker) => {
           const active = locker.id === selectedLockerId;
           return (
@@ -158,10 +156,10 @@ export function CatalogPage() {
               role="tab"
               aria-selected={active}
               onClick={() => setSelectedLockerId(locker.id)}
-              className={`rounded-full py-3 text-base font-extrabold transition ${
+              className={`label-caps -mb-px border-b-2 pb-3 transition-colors ${
                 active
-                  ? 'bg-conecta-cream text-conecta-deep'
-                  : 'border border-conecta-cream/25 text-conecta-cream/80 hover:border-conecta-cream/60'
+                  ? 'border-conecta-lime text-conecta-cream'
+                  : 'border-transparent text-conecta-cream/45 hover:text-conecta-cream/80'
               }`}
             >
               {lockerLabel(locker).short}
@@ -171,93 +169,101 @@ export function CatalogPage() {
       </div>
 
       {currentLocker && (
-        <p className="mt-3 flex items-start gap-1.5 text-sm text-conecta-cream/70">
-          <MapPin className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.75} />
-          <span>
-            {currentLocker.buildingLocation} · {availableCount} de {doors.length} disponíveis
-          </span>
+        <p className="mt-4 flex items-center gap-1.5 text-sm text-conecta-cream/55">
+          <MapPin className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+          <span className="truncate">{currentLocker.buildingLocation}</span>
+          <span className="shrink-0">· {availableCount}/{doors.length} livres</span>
         </p>
       )}
 
       {notice && !selectedDoor && (
-        <p role="alert" className="mt-4 rounded-2xl bg-amber-200 px-4 py-3 text-sm font-semibold text-amber-900">
+        <p role="alert" className="mt-5 border-l-2 border-amber-300 pl-3 text-sm text-amber-100">
           {notice}
         </p>
       )}
 
-      {/* Vitrine */}
-      <section className="mt-6 grid grid-cols-2 gap-3" aria-busy={loading}>
+      {/* Lista de objetos */}
+      <ul className="mt-6" aria-busy={loading}>
         {loading
           ? Array.from({ length: 4 }, (_, i) => (
-              <div key={i} className="h-52 animate-pulse rounded-card bg-conecta-cream/10" />
+              <li key={i} className="h-[76px] animate-pulse border-b border-conecta-cream/10" />
             ))
           : doors.map((door) => {
               if (!door.item) return null;
               const available = door.status === 'AVAILABLE';
               const selected = door.id === selectedDoorId;
               return (
-                <button
-                  key={door.id}
-                  onClick={() => openDoor(door)}
-                  disabled={!available}
-                  className={`flex flex-col rounded-card bg-conecta-cream p-4 text-left text-conecta-deep transition
-                    ${available ? 'active:scale-[0.98]' : 'cursor-not-allowed opacity-55'}
-                    ${selected ? 'ring-4 ring-conecta-lime' : ''}`}
-                >
-                  <div className="flex items-start justify-between">
+                <li key={door.id} className="border-b border-conecta-cream/10">
+                  <button
+                    onClick={() => openDoor(door)}
+                    disabled={!available}
+                    className={`flex w-full items-center gap-4 py-5 text-left transition-opacity
+                      ${available ? '' : 'cursor-not-allowed opacity-40'}`}
+                  >
                     <span
-                      className={`flex h-12 w-12 items-center justify-center rounded-2xl ${
-                        available ? 'bg-conecta-lime' : 'bg-conecta-mist'
+                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                        selected ? 'border-conecta-lime text-conecta-lime' : 'border-conecta-cream/25 text-conecta-cream'
                       }`}
                     >
-                      <ItemIcon item={door.item} className="h-6 w-6 text-conecta-deep" />
+                      <ItemIcon item={door.item} className="h-5 w-5" />
                     </span>
-                    <span className="label-caps text-conecta-deep/50">
-                      Porta {String(door.doorNumber).padStart(2, '0')}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[17px] font-semibold text-conecta-cream">
+                        {shortName(door.item)}
+                      </span>
+                      <span className="mt-0.5 block text-sm text-conecta-cream/55">
+                        Porta {String(door.doorNumber).padStart(2, '0')} · {brl(door.item.hourlyPriceCents)}/h
+                      </span>
                     </span>
-                  </div>
-                  <span className="mt-4 min-h-[2.5rem] text-lg font-extrabold leading-tight">
-                    {shortName(door.item)}
-                  </span>
-                  <span className="mt-2 text-base font-extrabold">{brl(door.item.hourlyPriceCents)}/h</span>
-                  <span className="text-sm text-conecta-deep/60">ou {brl(door.item.dailyPriceCents)}/dia</span>
-                  <span className="mt-3">
-                    <StatusBadge status={door.status} />
-                  </span>
-                </button>
+                    {available ? (
+                      <span className="flex shrink-0 items-center gap-3">
+                        <span className="h-2 w-2 rounded-full bg-conecta-lime" aria-label="Disponível" />
+                        <ChevronRight className="h-4 w-4 text-conecta-cream/40" strokeWidth={1.5} />
+                      </span>
+                    ) : (
+                      <span className="label-caps shrink-0 text-conecta-cream/70">
+                        {doorStatusInfo[door.status].label}
+                      </span>
+                    )}
+                  </button>
+                </li>
               );
             })}
-      </section>
+      </ul>
 
       {/* Painel de reserva */}
       {selectedDoor?.item && (
         <div className="fixed inset-x-0 bottom-0 z-20">
-          <div className="mx-auto max-w-md rounded-t-[2rem] bg-conecta-cream px-5 pb-6 pt-5 text-conecta-deep shadow-[0_-12px_40px_rgba(0,0,0,0.25)]">
+          <div className="mx-auto max-w-md rounded-t-[1.75rem] bg-conecta-cream px-6 pb-6 pt-6 text-conecta-deep shadow-[0_-8px_32px_rgba(0,0,0,0.18)]">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="label-caps text-conecta-deep/50">
+                <p className="label-caps text-conecta-deep/45">
                   Porta {String(selectedDoor.doorNumber).padStart(2, '0')} ·{' '}
                   {currentLocker ? lockerLabel(currentLocker).short : ''}
                 </p>
-                <h2 className="mt-1 text-xl leading-tight">{fullName(selectedDoor.item)}</h2>
+                <h2 className="mt-2 text-xl font-bold leading-tight tracking-normal">
+                  {fullName(selectedDoor.item)}
+                </h2>
               </div>
               <button
                 onClick={() => setSelectedDoorId(null)}
                 aria-label="Fechar"
-                className="rounded-full p-2 hover:bg-conecta-mist"
+                className="-mr-2 -mt-1 p-2 text-conecta-deep/50 hover:text-conecta-deep"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" strokeWidth={1.5} />
               </button>
             </div>
 
-            {/* Plano */}
-            <div className="mt-4 grid grid-cols-2 gap-1 rounded-full bg-conecta-mist p-1">
+            {/* Plano: abas sublinhadas */}
+            <div className="mt-6 flex gap-6 border-b border-conecta-deep/10">
               {(['HOURLY', 'DAILY'] as const).map((plan) => (
                 <button
                   key={plan}
                   onClick={() => changePlan(plan)}
-                  className={`rounded-full py-2.5 text-sm font-extrabold transition ${
-                    planType === plan ? 'bg-conecta-deep text-conecta-lime' : 'text-conecta-deep/70'
+                  className={`-mb-px border-b-2 pb-2.5 text-sm transition-colors ${
+                    planType === plan
+                      ? 'border-conecta-deep font-semibold text-conecta-deep'
+                      : 'border-transparent text-conecta-deep/45'
                   }`}
                 >
                   {plan === 'HOURLY'
@@ -268,46 +274,45 @@ export function CatalogPage() {
             </div>
 
             {/* Quantidade + total */}
-            <div className="mt-4 flex items-center justify-between">
-              <div className="flex items-center gap-3">
+            <div className="mt-6 flex items-end justify-between">
+              <div className="flex items-center gap-4">
                 <button
                   onClick={() => setUnits((u) => Math.max(1, u - 1))}
                   disabled={units <= 1}
                   aria-label="Diminuir"
-                  className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-conecta-deep/20 disabled:opacity-30"
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-conecta-deep/20 disabled:opacity-30"
                 >
-                  <Minus className="h-4 w-4" />
+                  <Minus className="h-3.5 w-3.5" strokeWidth={1.5} />
                 </button>
-                <span className="min-w-[4.5rem] text-center">
-                  <span className="block text-2xl font-extrabold leading-none">{units}</span>
-                  <span className="text-xs text-conecta-deep/60">{unitWord}</span>
+                <span className="min-w-[3.5rem] text-center text-sm">
+                  <span className="font-semibold">{units}</span> {unitWord}
                 </span>
                 <button
                   onClick={() => setUnits((u) => Math.min(MAX_UNITS, u + 1))}
                   disabled={units >= MAX_UNITS}
                   aria-label="Aumentar"
-                  className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-conecta-deep/20 disabled:opacity-30"
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-conecta-deep/20 disabled:opacity-30"
                 >
-                  <Plus className="h-4 w-4" />
+                  <Plus className="h-3.5 w-3.5" strokeWidth={1.5} />
                 </button>
               </div>
               <div className="text-right">
-                <span className="label-caps block text-conecta-deep/50">Total</span>
-                <span className="text-3xl font-extrabold">{brl(total)}</span>
+                <span className="label-caps block text-conecta-deep/45">Total</span>
+                <span className="text-2xl font-bold">{brl(total)}</span>
               </div>
             </div>
 
             {notice && (
-              <p role="alert" className="mt-3 rounded-2xl bg-red-100 px-4 py-2 text-sm font-semibold text-red-800">
+              <p role="alert" className="mt-4 border-l-2 border-red-600 pl-3 text-sm text-red-700">
                 {notice}
               </p>
             )}
 
-            <Button size="lg" fullWidth loading={reserving} onClick={handleReserve} className="mt-5">
-              Reservar · {brl(total)}
+            <Button size="lg" fullWidth loading={reserving} onClick={handleReserve} className="mt-6">
+              Reservar
             </Button>
-            <p className="mt-3 text-center text-xs text-conecta-deep/55">
-              A porta fica reservada por 10 minutos enquanto você paga com Pix.
+            <p className="mt-3 text-center text-xs text-conecta-deep/50">
+              Reservado por 10 min enquanto você paga com Pix.
             </p>
           </div>
         </div>
