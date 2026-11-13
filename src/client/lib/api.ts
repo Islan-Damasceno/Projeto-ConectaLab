@@ -46,6 +46,22 @@ const SESSION_USER_KEY = 'CONECTALAB_SESSION_USER';
 const SESSION_TOKEN_KEY = 'CONECTALAB_SESSION_TOKEN';
 export const MOCK_WS_CHANNEL_NAME = 'conectalab_mock_ws';
 
+/** Usuário logado (salvo no login) ou null. */
+export function getSessionUser(): { id: string; name: string; ra: string; email: string } | null {
+  try {
+    const raw = localStorage.getItem(SESSION_USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Encerra a sessão local do aluno. */
+export function logout(): void {
+  localStorage.removeItem(SESSION_TOKEN_KEY);
+  localStorage.removeItem(SESSION_USER_KEY);
+}
+
 export function isUsingMockApi(): boolean {
   const override = localStorage.getItem(MOCK_FLAG_KEY);
   if (override === 'true') return true;
