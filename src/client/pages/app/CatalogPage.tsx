@@ -1,18 +1,20 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BatteryCharging, Calculator, ChevronRight, MapPin, Minus, Plus, PlugZap, Shirt, X } from 'lucide-react';
+import { ChevronRight, MapPin, Minus, Plus, X } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { useConectaWs } from '../../lib/ws-client.js';
 import { AppHeader } from '../../components/AppHeader.js';
 import { Button, doorStatusInfo } from '../../components/ui.js';
-import type { CatalogItem, DoorWithItem, Locker, PlanType } from '../../../shared/types.js';
+import { ItemIcon } from '../../components/ItemIcon.js';
+import { brl, itemFullName, itemShortName } from '../../lib/format.js';
+import type { DoorWithItem, Locker, PlanType } from '../../../shared/types.js';
 
 /**
  * Tela 2 de 4: Catálogo por Armário e Seleção de Período (/app/catalog — RF02, RF03, RF04)
  * Cards FE-01.2, FE-01.3 e FE-01.4 (Dev 1 - Frontend)
  *
  * - Abas por armário (Bloco A / Bloco B) com a localização.
- * - Grade de objetos estilo vitrine, com status de cada porta.
+ * - Lista de objetos com ícone, porta, preço e status.
  * - Ao tocar num objeto disponível, abre um painel com plano (hora/diária),
  *   quantidade e preço total, e o botão de reservar.
  * - Atualiza sozinho quando outra pessoa reserva (evento CATALOG_STOCK_UPDATED).
@@ -20,35 +22,10 @@ import type { CatalogItem, DoorWithItem, Locker, PlanType } from '../../../share
 
 const MAX_UNITS = 8;
 
-const brl = (cents: number) =>
-  (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-
 /** "Armário Bloco B — Laboratórios e Saúde" → { short: "Bloco B", area: "Laboratórios e Saúde" } */
 function lockerLabel(locker: Locker) {
   const [left, area] = locker.name.split(' — ');
   return { short: left.replace(/^Armário\s+/i, ''), area: area ?? '' };
-}
-
-/** Nome curto para o card (o nome completo aparece no painel de reserva). */
-function shortName(item: CatalogItem) {
-  const sku = item.sku.toUpperCase();
-  if (sku.startsWith('CALC')) return 'Calculadora científica';
-  if (sku.startsWith('JALECO')) return 'Jaleco de laboratório';
-  if (sku.startsWith('PWR')) return 'Powerbank 10.000 mAh';
-  if (sku.startsWith('CHARGER')) return 'Carregador USB-C 65W';
-  return item.name.replace(/\s*#\d+$/, '');
-}
-
-/** Nome completo sem o "#2" das unidades repetidas. */
-const fullName = (item: CatalogItem) => item.name.replace(/\s*#\d+$/, '');
-
-function ItemIcon({ item, className }: { item: CatalogItem; className?: string }) {
-  const sku = item.sku.toUpperCase();
-  const props = { className, strokeWidth: 1.75 };
-  if (sku.startsWith('CALC')) return <Calculator {...props} />;
-  if (sku.startsWith('JALECO')) return <Shirt {...props} />;
-  if (sku.startsWith('PWR')) return <BatteryCharging {...props} />;
-  return <PlugZap {...props} />;
 }
 
 export function CatalogPage() {
@@ -212,11 +189,11 @@ export function CatalogPage() {
                         selected ? 'bg-conecta-deep text-conecta-lime' : 'bg-conecta-mist text-conecta-deep'
                       }`}
                     >
-                      <ItemIcon item={door.item} className="h-5 w-5" />
+                      <ItemIcon sku={door.item.sku} className="h-5 w-5" />
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block text-[17px] font-bold leading-tight text-conecta-deep">
-                        {shortName(door.item)}
+                        {itemShortName(door.item.sku, door.item.name)}
                       </span>
                       <span className="mt-1 block text-sm text-conecta-deep/60">
                         Porta {String(door.doorNumber).padStart(2, '0')} · {brl(door.item.hourlyPriceCents)}/h
@@ -254,7 +231,7 @@ export function CatalogPage() {
                   {currentLocker ? lockerLabel(currentLocker).short : ''}
                 </p>
                 <h2 className="mt-2 text-xl font-bold leading-tight tracking-normal">
-                  {fullName(selectedDoor.item)}
+                  {itemFullName(selectedDoor.item.name)}
                 </h2>
               </div>
               <button
