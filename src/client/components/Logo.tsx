@@ -24,11 +24,22 @@ export function LogoMark({ size = 96, className = '' }: { size?: number; classNa
   );
 }
 
-/** Nome "ConectaLab" com "Lab" em verde-limão. */
-export function Wordmark({ className = 'text-2xl' }: { className?: string }) {
+/**
+ * Nome "ConectaLab". Sobre fundo verde: creme + "Lab" em limão (original).
+ * Sobre fundo creme: verde escuro + "Lab" em verde principal (limão some no creme).
+ */
+export function Wordmark({
+  className = 'text-2xl',
+  tone = 'onDark',
+}: {
+  className?: string;
+  tone?: 'onDark' | 'onLight';
+}) {
+  const base = tone === 'onDark' ? 'text-conecta-cream' : 'text-conecta-deep';
+  const lab = tone === 'onDark' ? 'text-conecta-lime' : 'text-conecta-green';
   return (
-    <span className={`font-extrabold tracking-tight text-conecta-cream ${className}`}>
-      Conecta<span className="text-conecta-lime">Lab</span>
+    <span className={`font-extrabold tracking-tight ${base} ${className}`}>
+      Conecta<span className={lab}>Lab</span>
     </span>
   );
 }

@@ -21,32 +21,15 @@ function DevNavigationBanner() {
   };
 
   return (
-    <header className="bg-slate-900 border-b border-slate-800 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2">
-      <div className="flex items-center gap-3">
-        <span className="font-bold text-emerald-400">ConectaLab</span>
-        <nav className="flex items-center gap-2 text-slate-300">
-          <Link to="/app/login" className="hover:text-white underline">
-            📱 /app (Aluno)
-          </Link>
-          <span>•</span>
-          <Link to="/locker" className="hover:text-white underline">
-            🖥️ /locker (Simulador Projetor)
-          </Link>
-          <span>•</span>
-          <Link to="/admin" className="hover:text-white underline">
-            🛠️ /admin (Backoffice)
-          </Link>
-        </nav>
-      </div>
-      <button
-        onClick={toggleMode}
-        className={`px-2.5 py-1 rounded font-semibold transition ${
-          useMock
-            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-            : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-        }`}
-      >
-        Modo API: {useMock ? 'MOCK LOCAL (Dev 1 Autônomo)' : 'BACKEND REAL (SQLite + WS)'}
+    <header className="flex h-10 items-center justify-between gap-3 overflow-x-auto whitespace-nowrap bg-conecta-deep px-4 text-[10px] font-semibold uppercase tracking-[0.18em] text-conecta-cream/70">
+      <nav className="flex items-center gap-4">
+        <span className="text-conecta-lime">Dev</span>
+        <Link to="/app/login" className="hover:text-conecta-cream">App</Link>
+        <Link to="/locker" className="hover:text-conecta-cream">Armário</Link>
+        <Link to="/admin" className="hover:text-conecta-cream">Admin</Link>
+      </nav>
+      <button onClick={toggleMode} className={useMock ? 'text-amber-300' : 'text-conecta-lime'}>
+        {useMock ? 'Mock local' : 'Backend real'}
       </button>
     </header>
   );
