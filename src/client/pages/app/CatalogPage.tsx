@@ -141,49 +141,56 @@ export function CatalogPage() {
   const availableCount = doors.filter((d) => d.status === 'AVAILABLE').length;
 
   return (
-    <main className={`mx-auto w-full max-w-md px-5 pt-5 ${selectedDoor ? 'pb-96' : 'pb-10'}`}>
-      <AppHeader />
-
-      <h1 className="mt-10 text-[2.25rem] leading-[1] text-conecta-cream">Do que você precisa hoje?</h1>
-
-      {/* Abas dos armários: texto com sublinhado */}
-      <div className="mt-8 flex gap-8 border-b border-conecta-cream/15" role="tablist">
-        {lockers.map((locker) => {
-          const active = locker.id === selectedLockerId;
-          return (
-            <button
-              key={locker.id}
-              role="tab"
-              aria-selected={active}
-              onClick={() => setSelectedLockerId(locker.id)}
-              className={`label-caps -mb-px border-b-2 pb-3 transition-colors ${
-                active
-                  ? 'border-conecta-lime text-conecta-cream'
-                  : 'border-transparent text-conecta-cream/45 hover:text-conecta-cream/80'
-              }`}
-            >
-              {lockerLabel(locker).short}
-            </button>
-          );
-        })}
+    <main className="flex min-h-[calc(100vh-2.5rem)] flex-col">
+      {/* Parte de cima: verde */}
+      <div className="mx-auto w-full max-w-md px-5 pb-10 pt-5">
+        <AppHeader />
+        <h1 className="mt-10 text-[2.25rem] leading-[1] text-conecta-cream">Do que você precisa hoje?</h1>
       </div>
 
-      {currentLocker && (
-        <p className="mt-4 flex items-center gap-1.5 text-sm text-conecta-cream/55">
-          <MapPin className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
-          <span className="truncate">{currentLocker.buildingLocation}</span>
-          <span className="shrink-0">· {availableCount}/{doors.length} livres</span>
-        </p>
-      )}
+      {/* Parte de baixo: creme, de ponta a ponta até o fim da tela */}
+      <section
+        className={`flex-1 rounded-t-[2rem] bg-conecta-cream text-conecta-deep ${selectedDoor ? 'pb-96' : 'pb-10'}`}
+      >
+        <div className="mx-auto w-full max-w-md px-5 pt-7">
+          {/* Abas dos armários: texto com sublinhado */}
+          <div className="flex gap-8 border-b border-conecta-deep/10" role="tablist">
+            {lockers.map((locker) => {
+              const active = locker.id === selectedLockerId;
+              return (
+                <button
+                  key={locker.id}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setSelectedLockerId(locker.id)}
+                  className={`label-caps -mb-px border-b-2 pb-3 transition-colors ${
+                    active
+                      ? 'border-conecta-deep text-conecta-deep'
+                      : 'border-transparent text-conecta-deep/40 hover:text-conecta-deep/70'
+                  }`}
+                >
+                  {lockerLabel(locker).short}
+                </button>
+              );
+            })}
+          </div>
 
-      {notice && !selectedDoor && (
-        <p role="alert" className="mt-5 border-l-2 border-amber-300 pl-3 text-sm text-amber-100">
-          {notice}
-        </p>
-      )}
+          {currentLocker && (
+            <p className="mt-4 flex items-center gap-1.5 text-sm text-conecta-deep/55">
+              <MapPin className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+              <span className="truncate">{currentLocker.buildingLocation}</span>
+              <span className="shrink-0">· {availableCount}/{doors.length} livres</span>
+            </p>
+          )}
 
-      {/* Lista de objetos dentro de um cartão creme (mesmo cartão do login) */}
-      <ul className="mt-6 overflow-hidden rounded-card bg-conecta-cream px-5" aria-busy={loading}>
+          {notice && !selectedDoor && (
+            <p role="alert" className="mt-5 border-l-2 border-amber-500 pl-3 text-sm text-amber-800">
+              {notice}
+            </p>
+          )}
+
+      {/* Lista de objetos */}
+      <ul className="mt-2" aria-busy={loading}>
         {loading
           ? Array.from({ length: 4 }, (_, i) => (
               <li key={i} className="h-[84px] animate-pulse border-b border-conecta-deep/10 last:border-0" />
@@ -233,6 +240,8 @@ export function CatalogPage() {
               );
             })}
       </ul>
+        </div>
+      </section>
 
       {/* Painel de reserva */}
       {selectedDoor?.item && (
