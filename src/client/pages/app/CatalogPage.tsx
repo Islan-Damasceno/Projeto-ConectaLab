@@ -182,46 +182,49 @@ export function CatalogPage() {
         </p>
       )}
 
-      {/* Lista de objetos */}
-      <ul className="mt-6" aria-busy={loading}>
+      {/* Lista de objetos dentro de um cartão creme (mesmo cartão do login) */}
+      <ul className="mt-6 overflow-hidden rounded-card bg-conecta-cream px-5" aria-busy={loading}>
         {loading
           ? Array.from({ length: 4 }, (_, i) => (
-              <li key={i} className="h-[76px] animate-pulse border-b border-conecta-cream/10" />
+              <li key={i} className="h-[84px] animate-pulse border-b border-conecta-deep/10 last:border-0" />
             ))
           : doors.map((door) => {
               if (!door.item) return null;
               const available = door.status === 'AVAILABLE';
               const selected = door.id === selectedDoorId;
               return (
-                <li key={door.id} className="border-b border-conecta-cream/10">
+                <li key={door.id} className="border-b border-conecta-deep/10 last:border-0">
                   <button
                     onClick={() => openDoor(door)}
                     disabled={!available}
-                    className={`flex w-full items-center gap-4 py-5 text-left transition-opacity
-                      ${available ? '' : 'cursor-not-allowed opacity-40'}`}
+                    className={`flex w-full items-center gap-3.5 py-5 text-left transition-opacity
+                      ${available ? '' : 'cursor-not-allowed opacity-45'}`}
                   >
                     <span
-                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
-                        selected ? 'border-conecta-lime text-conecta-lime' : 'border-conecta-cream/25 text-conecta-cream'
+                      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition-colors ${
+                        selected ? 'bg-conecta-deep text-conecta-lime' : 'bg-conecta-mist text-conecta-deep'
                       }`}
                     >
                       <ItemIcon item={door.item} className="h-5 w-5" />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[17px] font-semibold text-conecta-cream">
+                      <span className="block text-[17px] font-bold leading-tight text-conecta-deep">
                         {shortName(door.item)}
                       </span>
-                      <span className="mt-0.5 block text-sm text-conecta-cream/55">
+                      <span className="mt-1 block text-sm text-conecta-deep/60">
                         Porta {String(door.doorNumber).padStart(2, '0')} · {brl(door.item.hourlyPriceCents)}/h
                       </span>
                     </span>
                     {available ? (
                       <span className="flex shrink-0 items-center gap-3">
-                        <span className="h-2 w-2 rounded-full bg-conecta-lime" aria-label="Disponível" />
-                        <ChevronRight className="h-4 w-4 text-conecta-cream/40" strokeWidth={1.5} />
+                        <span
+                          className="h-2.5 w-2.5 rounded-full bg-conecta-lime ring-1 ring-conecta-deep/30"
+                          aria-label="Disponível"
+                        />
+                        <ChevronRight className="h-4 w-4 text-conecta-deep/40" strokeWidth={1.75} />
                       </span>
                     ) : (
-                      <span className="label-caps shrink-0 text-conecta-cream/70">
+                      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-conecta-deep/70">
                         {doorStatusInfo[door.status].label}
                       </span>
                     )}
